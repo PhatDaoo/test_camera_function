@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <title>Super Zoom Sphere</title>
+    <style>
+        body { margin: 0; background-color: #000; overflow: hidden; }
+        canvas { display: block; position: absolute; top: 0; left: 0; }
+        #videoElement { position: absolute; top: 0; left: 0; opacity: 0; pointer-events: none; }
+        
+        #status {
+            position: absolute; top: 20px; left: 20px;
+            color: #00ff00; font-family: monospace; font-size: 14px;
+            background: rgba(0,0,0,0.5); padding: 5px 10px; border-radius: 5px;
+            pointer-events: none;
+            user-select: none;
+        }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+<div id="status">Đang khởi động...</div>
+<video id="videoElement"></video>
+<canvas id="canvas"></canvas>
+
+<script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const videoElement = document.getElementById('videoElement');
+    const statusDiv = document.getElementById('status');
+    
+    let width, height, cx, cy;
+    
+    // --- CẤU HÌNH ---
+    const PARTICLE_COUNT = 1500; 
+    let particles = [];
+    
+    // Biến điều khiển
+    let targetRotationSpeedX = 0;
+    let targetRotationSpeedY = 0;
+    let rotationSpeedX = 0;
+    let rotationSpeedY = 0;
+    let currentAngleX = 0;
+    let currentAngleY = 0;
+    
+    // ZOOM: Mặc định to vừa phải
+    let currentZoom = 0.1;
+    let targetZoom = 1.0;
+
+    let cursorX = 0, cursorY = 0;
+    let isHandDetected = false;
+
+    let lastValidDist = 0;
+
+    function resize() {
+        width = canvas.width = window.innerWidth;
+        height = canvas.height = window.innerHeight;
+        cx = width / 2;
+        cy = height / 2;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // --- CLASS PARTICLE 3D ---
+    class Particle {
+        constructor(layerIndex) {
+            this.layer = layerIndex;
+            const theta = Math.random() * Math.PI * 2;
+            const phi = Math.acos((Math.random() * 2) - 1);
+            
+            // Thiết lập bán kính dựa trên tầng (Layer)
+            let r;
+            if (this.layer === 0) r = 70 + Math.random() * 30;   // Lớp trong (Bé nhất)
+            else if (this.layer === 1) r = 160 + Math.random() * 50; // Lớp giữa
+            else r = 280 + Math.random() * 80;                  // Lớp ngoài (Lớn nhất)
+            
+            this.ox = r * Math.sin(phi) * Math.cos(theta);
+            this.oy = r * Math.sin(phi) * Math.sin(theta);
+            this.oz = r * Math.cos(phi);
+            
+            this.x = this.ox; this.y = this.oy; this.z = this.oz;
+            
+            // Màu sắc: Lớp giữa (ngược chiều) sẽ có màu khác để nổi bật
+            const hue = this.layer === 1 ? 280 : 200; 
+            this.color = `hsl(${hue + Math.random()*40}, 100%, 70%)`;
+            this.size = this.layer === 2 ? 1.5 : 2.5; // Hạt ngoài nhỏ hơn để mịn, hạt trong to để rõ
+        }
+
+        update(angX, angY) {
+            // Lớp giữa (layer 1) quay ngược chiều (-1)
+            // Lớp 0 và 2 quay cùng chiều (1)
+            const direction = this.layer === 1 ? -1 : 1;
+            const curX = angX * direction;
+            const curY = angY * direction;
+
+            let x1 = this.ox * Math.cos(curY) - this.oz * Math.sin(curY);
+            let z1 = this.oz * Math.cos(curY) + this.ox * Math.sin(curY);
+            let y1 = this.oy * Math.cos(curX) - z1 * Math.sin(curX);
+            let z2 = z1 * Math.cos(curX) + this.oy * Math.sin(curX);
+
+            this.x = x1; this.y = y1; this.z = z2;
+        }
+
+        draw() {
+            const fov = 400; 
+            const scale = fov / (fov + this.z + 600) * currentZoom; 
+
+            const x2d = this.x * scale + cx;
+            const y2d = this.y * scale + cy;
+            
+            if (scale > 0) {
+                ctx.globalAlpha = Math.max(0.1, Math.min(1, scale));
+                ctx.fillStyle = this.color;
+                ctx.beginPath();
+                ctx.arc(x2d, y2d, this.size * scale, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+    }
+
+    for (let i = 0; i < PARTICLE_COUNT; i++) {
+        let layerIndex;
+        
+        // Chia theo tỷ lệ phần trăm
+        if (i < PARTICLE_COUNT * 0.7) {
+            layerIndex = 2; // Lớp ngoài cùng (70% số hạt)
+        } else if (i < PARTICLE_COUNT * 0.9) {
+            layerIndex = 1; // Lớp giữa (20% số hạt)
+        } else {
+            layerIndex = 0; // Lớp trong cùng (10% số hạt)
+        }
+        
+        particles.push(new Particle(layerIndex));
+    }
+
+    // --- XỬ LÝ MEDIAPIPE ---
+    const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+    hands.setOptions({
+        maxNumHands: 1,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5
+    });
+
+    hands.onResults(results => {
+        if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+            isHandDetected = true;
+            const lm = results.multiHandLandmarks[0];
+            
+            // 1. Joystick Xoay (Dựa trên vị trí cổ tay - điểm 0)
+            let hx = 1 - lm[0].x; 
+            let hy = lm[0].y;
+            cursorX = hx * width;
+            cursorY = hy * height;
+
+            targetRotationSpeedY = (hx - 0.5) * 0.05; // Tăng tốc độ xoay
+            targetRotationSpeedX = (hy - 0.5) * 0.05;
+
+            // 2. SUPER ZOOM (Dựa trên khoảng cách ngón cái [4] và trỏ [8])
+            const dx = lm[4].x - lm[8].x;
+            const dy = lm[4].y - lm[8].y;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            
+            // --- CÔNG THỨC ZOOM MỚI ---
+            // dist thường từ 0.02 (chụm) đến 0.25 (mở)
+            // Nhân với 25 để tăng độ nhạy
+            if (Math.abs(dist - lastValidDist) > 0.005) {
+                let rawZoom = dist * 50; 
+                targetZoom = Math.min(Math.max(rawZoom, 0.1), 80.0);
+                lastValidDist = dist;
+            }
+
+            statusDiv.innerText = `ZOOM: ${targetZoom.toFixed(1)}x | Xoay: ${Math.round(hx*100)}%`;
+            statusDiv.style.color = "#00ff00";
+
+        } else {
+            isHandDetected = false;
+            statusDiv.innerText = "🔴 Mất tín hiệu tay";
+            statusDiv.style.color = "#ff5555";
+            // Tốc độ tự động quay nhẹ nhàng
+            targetRotationSpeedX = 0.002; 
+            targetRotationSpeedY = 0.003;
+        }
+    });
+
+    const camera = new Camera(videoElement, {
+        onFrame: async () => { await hands.send({image: videoElement}); },
+        width: 640, height: 480
+    });
+    camera.start();
+
+    // --- ANIMATION LOOP ---
+    function animate() {
+        // Xóa màn hình với độ mờ nhẹ để tạo vệt chuyển động đẹp mắt
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+        ctx.fillRect(0, 0, width, height);
+
+        // Lerp cho mượt
+        rotationSpeedX += (targetRotationSpeedX - rotationSpeedX) * 0.1;
+        rotationSpeedY += (targetRotationSpeedY - rotationSpeedY) * 0.1;
+        currentZoom += (targetZoom - currentZoom) * 0.05; // Lerp zoom
+
+        currentAngleX += rotationSpeedX;
+        currentAngleY += rotationSpeedY;
+
+        // Sắp xếp hạt theo chiều sâu (Z-sort)
+        particles.sort((a, b) => b.z - a.z);
+
+        particles.forEach(p => {
+            p.update(currentAngleX, currentAngleY);
+            p.draw();
+        });
+
+        // Vẽ tâm điều khiển
+        /*if (isHandDetected) {
+            ctx.beginPath();
+            ctx.strokeStyle = '#00ff00';
+            ctx.arc(cursorX, cursorY, 15, 0, Math.PI * 2);
+            ctx.stroke();
+            // Vẽ thanh mức độ Zoom cạnh ngón tay
+            ctx.fillStyle = '#00ff00';
+            ctx.fillRect(cursorX + 20, cursorY, 5, -currentZoom * 20);
+        }*/
+
+        requestAnimationFrame(animate);
+    }
+    animate();
+
+</script>
+</body>
+</html>
