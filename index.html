@@ -215,7 +215,7 @@
         });
 
         // Vẽ tâm điều khiển
-        /*if (isHandDetected) {
+        if (isHandDetected) {
             ctx.beginPath();
             ctx.strokeStyle = '#00ff00';
             ctx.arc(cursorX, cursorY, 15, 0, Math.PI * 2);
@@ -223,7 +223,7 @@
             // Vẽ thanh mức độ Zoom cạnh ngón tay
             ctx.fillStyle = '#00ff00';
             ctx.fillRect(cursorX + 20, cursorY, 5, -currentZoom * 20);
-        }*/
+        }
 
         requestAnimationFrame(animate);
     }
